@@ -64,6 +64,38 @@ def default_config(csp: DIRECTIVES_T | None) -> DIRECTIVES_T | None:
     return config
 
 
+def get_policy_configs(report_only: bool = False) -> list[DIRECTIVES_T | None]:
+    setting_name = "CONTENT_SECURITY_POLICY_REPORT_ONLY" if report_only else "CONTENT_SECURITY_POLICY"
+    setting = getattr(settings, setting_name, None)
+    if setting is None:
+        return [None]
+
+    configs: list[DIRECTIVES_T | None] = [default_config(setting.get("DIRECTIVES", {}))]
+    additional_policies = setting.get("ADDITIONAL_POLICIES", ()) or ()
+    if not isinstance(additional_policies, (list, tuple)):
+        raise TypeError(f"{setting_name}['ADDITIONAL_POLICIES'] must be a list or tuple.")
+
+    for policy in additional_policies:
+        if isinstance(policy, dict):
+            directives = policy.get("DIRECTIVES", {})
+        else:
+            raise TypeError(f"Each policy in {setting_name}['ADDITIONAL_POLICIES'] must be a dictionary.")
+        if directives is not None and not isinstance(directives, dict):
+            raise TypeError(f"Directives in {setting_name}['ADDITIONAL_POLICIES'] must be a dictionary.")
+        configs.append(default_config(directives if directives is not None else {}))
+
+    return configs
+
+
+def _normalize_directive_value(value: Any) -> tuple[Any, ...]:
+    value = copy.copy(value)
+    if isinstance(value, set):
+        value = sorted(value)
+    if not isinstance(value, (list, tuple)):
+        value = (value,)
+    return tuple(value)
+
+
 def build_policy(
     config: DIRECTIVES_T | None = None,
     update: DIRECTIVES_T | None = None,
@@ -90,26 +122,18 @@ def build_policy(
 
     csp = {}
 
-    for k in set(chain(config, replace)):
+    for k in dict.fromkeys(chain(config, replace)):
         if k in replace:
             v = replace[k]
         else:
             v = config[k]
         if v is not None:
-            v = copy.copy(v)
-            if isinstance(v, set):
-                v = sorted(v)
-            if not isinstance(v, (list, tuple)):
-                v = (v,)
+            v = _normalize_directive_value(v)
             csp[k] = v
 
     for k, v in update.items():
         if v is not None:
-            v = copy.copy(v)
-            if isinstance(v, set):
-                v = sorted(v)
-            if not isinstance(v, (list, tuple)):
-                v = (v,)
+            v = _normalize_directive_value(v)
             if csp.get(k) is None:
                 csp[k] = v
             else:

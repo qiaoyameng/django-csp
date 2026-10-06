@@ -10,6 +10,10 @@ need to expand or change the policy. django-csp includes four decorators to help
 All decorators take an optional keyword argument, ``REPORT_ONLY``, which defaults to ``False``. If
 set to ``True``, the decorator will update the report-only policy instead of the enforced policy.
 
+Decorators that modify policies also accept ``POLICY_INDEX``. Index ``0`` (the default) is the
+primary policy, and additional policies start at index ``1``. Update and replace directives are
+never copied between policies, so the decorator affects only the explicitly selected policy.
+
 ``@csp_exempt``
 ===============
 
@@ -79,6 +83,12 @@ to update the report-only policy instead of the enforced policy.
         return render(...)
 
 
+    # Will append the source only to the first additional enforced policy.
+    @csp_update({"img-src": "module-img.com"}, POLICY_INDEX=1)
+    def module_view(request):
+        return render(...)
+
+
 ``@csp_replace``
 ================
 
@@ -102,6 +112,12 @@ The arguments and values are the same as ``@csp_update``:
     # Will allow images only from cdn-img2.com in the report-only policy.
     @csp_replace({"img-src": "cdn-img2.com"}, REPORT_ONLY=True)
     def myview(request):
+        return render(...)
+
+
+    # Will replace `img-src` only in the first additional enforced policy.
+    @csp_replace({"img-src": "module-img2.com"}, POLICY_INDEX=1)
+    def module_view(request):
         return render(...)
 
 The ``csp_replace`` decorator can also be used to remove a directive from the policy by setting the

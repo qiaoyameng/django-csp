@@ -119,6 +119,38 @@ policy.
        instead of ``csp.middleware.CSPMiddleware``.
        See :ref:`violation reporting <reports-chapter>` for more details.
 
+``ADDITIONAL_POLICIES``
+    A ``list`` or ``tuple`` containing additional policies. Each item uses the same shape as
+    ``CONTENT_SECURITY_POLICY`` and normally contains a ``DIRECTIVES`` dictionary. Directives are
+    not merged between policies.
+
+    Browsers enforce all policies in a header. A resource is allowed only when it satisfies every
+    policy, so an additional policy can tighten the application policy without broadening it. Each
+    policy independently resolves ``default-src``, nonces, hashes, and empty directives.
+
+    Multiple policies are serialized in a single header according to the HTTP list rule, for
+    example: ``default-src 'self', script-src 'strict.example'``.
+
+    .. code-block:: python
+
+        CONTENT_SECURITY_POLICY = {
+            "DIRECTIVES": {
+                "default-src": [SELF],
+                "script-src": ["cdn.example"],
+            },
+            "ADDITIONAL_POLICIES": [
+                {
+                    "DIRECTIVES": {
+                        "default-src": [SELF],
+                        "script-src": ["payments.example"],
+                    }
+                }
+            ],
+        }
+
+    The same key may be used under ``CONTENT_SECURITY_POLICY_REPORT_ONLY``. Enforced and
+    report-only policies remain separate.
+
 ``DIRECTIVES``
     A dictionary of policy directives. Each key in the dictionary is a directive and the value is a
     list of sources for that directive. The following is a list of all the directives that can be

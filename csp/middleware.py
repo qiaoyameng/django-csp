@@ -4,9 +4,9 @@ import base64
 import http.client as http_client
 import os
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 from django.utils.deprecation import MiddlewareMixin
@@ -14,19 +14,11 @@ from django.utils.functional import SimpleLazyObject, empty
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.exceptions import CSPNonceError
-from csp.utils import DIRECTIVES_T, build_policy
+from csp.policies import PolicyParts, PolicyPartsCollection
+from csp.utils import DIRECTIVES_T, build_policy, get_policy_configs
 
 if TYPE_CHECKING:
     from django.http import HttpRequest, HttpResponseBase
-
-
-@dataclass
-class PolicyParts:
-    # A dataclass is used rather than a namedtuple so that the attributes are mutable
-    config: DIRECTIVES_T | None = None
-    update: DIRECTIVES_T | None = None
-    replace: DIRECTIVES_T | None = None
-    nonce: str | None = None
 
 
 class CheckableLazyObject(SimpleLazyObject):
@@ -79,8 +71,9 @@ class CSPMiddleware(MiddlewareMixin):
         if response.status_code in exempted_debug_codes and settings.DEBUG:
             return response
 
-        policy_parts = self.get_policy_parts(request=request, response=response)
-        csp = build_policy(**asdict(policy_parts))
+        policy_collection = self.get_policy_collection(request=request, response=response)
+        csp_policies = [build_policy(**asdict(policy_parts)) for policy_parts in policy_collection.enforced]
+        csp = ", ".join(policy for policy in csp_policies if policy)
         if csp:
             # Only set header if not already set and not an excluded prefix and not exempted.
             is_not_exempt = getattr(response, "_csp_exempt", False) is False
@@ -91,8 +84,11 @@ class CSPMiddleware(MiddlewareMixin):
             if no_header and is_not_exempt and is_not_excluded:
                 response[HEADER] = csp
 
-        policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
-        csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
+        csp_policies_ro = [
+            build_policy(**asdict(policy_parts), report_only=True)
+            for policy_parts in policy_collection.report_only
+        ]
+        csp_ro = ", ".join(policy for policy in csp_policies_ro if policy)
         if csp_ro:
             # Only set header if not already set and not an excluded prefix and not exempted.
             is_not_exempt = getattr(response, "_csp_exempt_ro", False) is False
@@ -127,15 +123,108 @@ class CSPMiddleware(MiddlewareMixin):
         response: HttpResponseBase,
         report_only: bool = False,
     ) -> PolicyParts:
-        if report_only:
-            config = getattr(response, "_csp_config_ro", None)
-            update = getattr(response, "_csp_update_ro", None)
-            replace = getattr(response, "_csp_replace_ro", None)
+        setting_configs = get_policy_configs(report_only=report_only)
+        return self._build_policy_parts(request, response, report_only, 0, setting_configs)
+
+    def get_policy_collection(
+        self,
+        request: HttpRequest,
+        response: HttpResponseBase,
+    ) -> PolicyPartsCollection:
+        return PolicyPartsCollection(
+            enforced=self.get_policy_parts_list(request=request, response=response, report_only=False),
+            report_only=self.get_policy_parts_list(request=request, response=response, report_only=True),
+        )
+
+    @staticmethod
+    def _get_policy_attribute(
+        response: HttpResponseBase,
+        attribute: str,
+        report_only: bool,
+        policy_index: int,
+    ) -> Any:
+        suffix = "_ro" if report_only else ""
+        if policy_index == 0:
+            return getattr(response, f"_csp_{attribute}{suffix}", None)
+        values = getattr(response, f"_csp_{attribute}_additional{suffix}", {})
+        if isinstance(values, dict):
+            return values.get(policy_index)
+        return None
+
+    def get_policy_parts_list(
+        self,
+        request: HttpRequest,
+        response: HttpResponseBase,
+        report_only: bool = False,
+    ) -> list[PolicyParts]:
+        setting_configs = get_policy_configs(report_only=report_only)
+        suffix = "_ro" if report_only else ""
+
+        config_overrides = getattr(response, f"_csp_config_additional{suffix}", {})
+        updates = getattr(response, f"_csp_update_additional{suffix}", {})
+        replaces = getattr(response, f"_csp_replace_additional{suffix}", {})
+        if not isinstance(config_overrides, dict) or not isinstance(updates, dict) or not isinstance(replaces, dict):
+            raise TypeError("Additional CSP policy attributes must be dictionaries keyed by policy index.")
+
+        policy_count = len(setting_configs)
+        for indexed_attribute in (config_overrides, updates, replaces):
+            for policy_index in indexed_attribute:
+                if not isinstance(policy_index, int) or isinstance(policy_index, bool):
+                    raise TypeError("CSP policy indexes must be integers.")
+                if policy_index < 0:
+                    raise ValueError("CSP policy indexes must be non-negative.")
+
+        configured_count = len(setting_configs)
+        config_override_count = max(config_overrides, default=0)
+        policy_count = max(policy_count, config_override_count + 1)
+        for policy_index in range(1, policy_count):
+            if policy_index >= configured_count and policy_index not in config_overrides:
+                raise ValueError("Additional CSP policy indexes must start at 1 and be contiguous.")
+
+        for indexed_attribute in (updates, replaces):
+            for policy_index in indexed_attribute:
+                if policy_index >= policy_count:
+                    raise ValueError(f"CSP policy index {policy_index} is not configured.")
+
+        policy_parts = []
+        for policy_index in range(policy_count):
+            if policy_index == 0:
+                policy_parts.append(self.get_policy_parts(request=request, response=response, report_only=report_only))
+                continue
+
+            if policy_index in config_overrides:
+                config = config_overrides[policy_index]
+            else:
+                config = setting_configs[policy_index]
+            policy_parts.append(self._build_policy_parts(request, response, report_only, policy_index, setting_configs, config))
+
+        return policy_parts
+
+    def _build_policy_parts(
+        self,
+        request: HttpRequest,
+        response: HttpResponseBase,
+        report_only: bool,
+        policy_index: int,
+        setting_configs: list[dict[str, Any] | None],
+        config_override: DIRECTIVES_T | None = None,
+    ) -> PolicyParts:
+        suffix = "_ro" if report_only else ""
+        if policy_index == 0:
+            primary_config = getattr(response, f"_csp_config{suffix}", None)
+            if primary_config is not None:
+                config = primary_config
+            elif setting_configs:
+                config = setting_configs[0]
+            else:
+                config = None
         else:
-            config = getattr(response, "_csp_config", None)
-            update = getattr(response, "_csp_update", None)
-            replace = getattr(response, "_csp_replace", None)
+            config = config_override
 
         nonce = getattr(request, "_csp_nonce", None)
-
-        return PolicyParts(config, update, replace, nonce)
+        return PolicyParts(
+            config=config,
+            update=self._get_policy_attribute(response, "update", report_only, policy_index),
+            replace=self._get_policy_attribute(response, "replace", report_only, policy_index),
+            nonce=nonce,
+        )

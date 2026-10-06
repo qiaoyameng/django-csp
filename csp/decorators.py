@@ -42,7 +42,37 @@ DECORATOR_DEPRECATION_ERROR = (
 )
 
 
-def csp_update(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, **kwargs: Any) -> _VIEW_DECORATOR_T:
+def _set_policy_attribute(
+    response: HttpResponseBase,
+    attribute: str,
+    value: Any,
+    report_only: bool,
+    policy_index: int,
+) -> None:
+    if not isinstance(policy_index, int) or isinstance(policy_index, bool):
+        raise TypeError("POLICY_INDEX must be an integer.")
+    if policy_index < 0:
+        raise ValueError("POLICY_INDEX must be non-negative.")
+
+    suffix = "_ro" if report_only else ""
+    if policy_index == 0:
+        setattr(response, f"_csp_{attribute}{suffix}", value)
+        return
+
+    attribute_name = f"_csp_{attribute}_additional{suffix}"
+    policies = getattr(response, attribute_name, None)
+    if not isinstance(policies, dict):
+        policies = {}
+        setattr(response, attribute_name, policies)
+    policies[policy_index] = value
+
+
+def csp_update(
+    config: dict[str, Any] | None = None,
+    REPORT_ONLY: bool = False,
+    POLICY_INDEX: int = 0,
+    **kwargs: Any,
+) -> _VIEW_DECORATOR_T:
     if config is None and kwargs:
         raise RuntimeError(DECORATOR_DEPRECATION_ERROR.format(fname="csp_update"))
 
@@ -50,10 +80,7 @@ def csp_update(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, 
         @wraps(f)
         def _wrapped(*a: Any, **kw: Any) -> HttpResponseBase:
             resp = f(*a, **kw)
-            if REPORT_ONLY:
-                setattr(resp, "_csp_update_ro", config)
-            else:
-                setattr(resp, "_csp_update", config)
+            _set_policy_attribute(resp, "update", config, REPORT_ONLY, POLICY_INDEX)
             return resp
 
         return _wrapped
@@ -61,7 +88,12 @@ def csp_update(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, 
     return decorator
 
 
-def csp_replace(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, **kwargs: Any) -> _VIEW_DECORATOR_T:
+def csp_replace(
+    config: dict[str, Any] | None = None,
+    REPORT_ONLY: bool = False,
+    POLICY_INDEX: int = 0,
+    **kwargs: Any,
+) -> _VIEW_DECORATOR_T:
     if config is None and kwargs:
         raise RuntimeError(DECORATOR_DEPRECATION_ERROR.format(fname="csp_replace"))
 
@@ -69,10 +101,7 @@ def csp_replace(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False,
         @wraps(f)
         def _wrapped(*a: Any, **kw: Any) -> HttpResponseBase:
             resp = f(*a, **kw)
-            if REPORT_ONLY:
-                setattr(resp, "_csp_replace_ro", config)
-            else:
-                setattr(resp, "_csp_replace", config)
+            _set_policy_attribute(resp, "replace", config, REPORT_ONLY, POLICY_INDEX)
             return resp
 
         return _wrapped
@@ -80,7 +109,12 @@ def csp_replace(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False,
     return decorator
 
 
-def csp(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, **kwargs: Any) -> _VIEW_DECORATOR_T:
+def csp(
+    config: dict[str, Any] | None = None,
+    REPORT_ONLY: bool = False,
+    POLICY_INDEX: int = 0,
+    **kwargs: Any,
+) -> _VIEW_DECORATOR_T:
     if config is None and kwargs:
         raise RuntimeError(DECORATOR_DEPRECATION_ERROR.format(fname="csp"))
 
@@ -93,10 +127,7 @@ def csp(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, **kwarg
         @wraps(f)
         def _wrapped(*a: Any, **kw: Any) -> HttpResponseBase:
             resp = f(*a, **kw)
-            if REPORT_ONLY:
-                setattr(resp, "_csp_config_ro", processed_config)
-            else:
-                setattr(resp, "_csp_config", processed_config)
+            _set_policy_attribute(resp, "config", processed_config, REPORT_ONLY, POLICY_INDEX)
             return resp
 
         return _wrapped

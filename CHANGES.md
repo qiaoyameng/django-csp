@@ -101,6 +101,11 @@ separate list to using a sentinel `NONCE` value in the directive itself.
 - **Dual Policy Support**: Added support for enforced and report-only policies simultaneously using
 the separate `CONTENT_SECURITY_POLICY` and `CONTENT_SECURITY_POLICY_REPORT_ONLY` settings.
 
+- **Additional Policies**: Added `ADDITIONAL_POLICIES` support. Each configured policy is
+serialized independently and enforced together by the browser, so additional policies can tighten
+permissions without merging source lists. View decorators accept `POLICY_INDEX` to target one
+policy, and enforced/report-only policy collections remain separate.
+
   **Example:**
   ```python
   from csp.constants import NONE, SELF
