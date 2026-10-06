@@ -27,6 +27,50 @@ view.
         return render(...)
 
 
+``@csp_additional``
+===================
+
+The ``@csp_additional`` decorator adds an **additional, independently enforced policy** to the
+response instead of modifying the main policy. Browsers enforce every policy they receive, so an
+additional policy can only further restrict what the main policy allows — it can never widen it.
+This is useful when a reusable module wants to tighten the policy for its own views without
+depending on (or accidentally loosening) the site-wide policy: unlike ``@csp_update``, which
+appends to the main policy's source lists, an additional policy keeps its own source lists.
+
+Each additional policy is processed independently: it gets its own ``default-src`` fallback, its
+own nonce handling (a policy only receives the nonce if it opts in via ``csp.constants.NONCE``),
+and its own hash and empty-directive handling. The directives of multiple policies are never
+merged into a single source union. ``@csp_update`` and ``@csp_replace`` only apply to the main
+policy and never touch additional policies.
+
+Enforced and report-only additional policies are stored separately; pass ``REPORT_ONLY=True`` to
+add a report-only additional policy. The decorator can be stacked to attach several additional
+policies to one view.
+
+.. code-block:: python
+
+    from csp.constants import NONCE, SELF
+    from csp.decorators import csp_additional
+
+
+    # Browsers will enforce both the main policy and this one, so scripts are
+    # effectively limited to 'self' regardless of what the main policy allows.
+    @csp_additional({"script-src": [SELF]})
+    def myview(request):
+        return render(...)
+
+
+    # Stacked decorators attach multiple additional policies. Only the first
+    # of these allows nonce'd scripts.
+    @csp_additional({"script-src": [SELF, NONCE]})
+    @csp_additional({"script-src": [SELF]})
+    def myview(request):
+        return render(...)
+
+You can also attach additional policies manually by appending directive dicts to the
+``_csp_additional`` or ``_csp_additional_ro`` attribute on the response.
+
+
     # Will not have a CSP report-only header.
     @csp_exempt(REPORT_ONLY=True)
     def myview(request):

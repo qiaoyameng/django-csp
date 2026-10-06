@@ -9,7 +9,7 @@ from django.test.utils import override_settings
 
 import pytest
 
-from csp.constants import HEADER, HEADER_REPORT_ONLY, SELF
+from csp.constants import HEADER, HEADER_REPORT_ONLY, NONCE, SELF
 from csp.exceptions import CSPNonceError
 from csp.middleware import CheckableLazyObject, CSPMiddleware
 from csp.tests.utils import response
@@ -287,3 +287,112 @@ def test_set_nonce_access_after_middleware_is_ok() -> None:
     mw.process_response(request, HttpResponse())
     assert bool(getattr(request, "csp_nonce", False)) is True
     assert str(getattr(request, "csp_nonce")) == nonce
+
+
+def test_additional_policies() -> None:
+    # Two policies allowing different script sources are output as separate
+    # policies, each with its own default-src fallback.
+    request = rf.get("/")
+    response = HttpResponse()
+    response._csp_additional = [{"script-src": ["https://cdn.example.com"]}]
+    mw.process_response(request, response)
+    policies = response[HEADER].split(", ")
+    assert len(policies) == 2
+    assert sorted(policies[0].split("; ")) == ["default-src 'self'"]
+    assert sorted(policies[1].split("; ")) == [
+        "default-src 'self'",
+        "script-src https://cdn.example.com",
+    ]
+
+
+def test_additional_policies_multiple() -> None:
+    request = rf.get("/")
+    response = HttpResponse()
+    response._csp_additional = [
+        {"script-src": ["https://one.example.com"]},
+        {"script-src": ["https://two.example.com"]},
+    ]
+    mw.process_response(request, response)
+    policies = response[HEADER].split(", ")
+    assert len(policies) == 3
+    assert "script-src https://one.example.com" in policies[1]
+    assert "script-src https://two.example.com" in policies[2]
+
+
+def test_additional_policies_nonce_independent() -> None:
+    # Each policy handles the nonce independently: a policy only gets the
+    # nonce if its own directives opt in via the NONCE sentinel.
+    request = rf.get("/")
+    mw.process_request(request)
+    nonce = str(getattr(request, "csp_nonce"))
+    response = HttpResponse()
+    response._csp_additional = [
+        {"script-src": [SELF, NONCE]},
+        {"script-src": [SELF]},
+    ]
+    mw.process_response(request, response)
+    policies = response[HEADER].split(", ")
+    assert len(policies) == 3
+    # The main policy (default-src 'self' NONCE in settings) gets the nonce.
+    assert f"'nonce-{nonce}'" in policies[0]
+    # The first additional policy allows nonces, the second does not.
+    assert f"'nonce-{nonce}'" in policies[1]
+    assert "nonce-" not in policies[2]
+    assert sorted(policies[2].split("; ")) == ["default-src 'self'", "script-src 'self'"]
+
+
+def test_additional_policies_hash_and_empty_directive() -> None:
+    # Hashes and empty directives are handled per policy.
+    request = rf.get("/")
+    response = HttpResponse()
+    response._csp_additional = [
+        {"script-src": ["'sha256-abc123'"]},
+        {"sandbox": []},
+    ]
+    mw.process_response(request, response)
+    policies = response[HEADER].split(", ")
+    assert len(policies) == 3
+    assert sorted(policies[1].split("; ")) == ["default-src 'self'", "script-src 'sha256-abc123'"]
+    assert sorted(policies[2].split("; ")) == ["default-src 'self'", "sandbox"]
+
+
+def test_additional_policies_report_only_separate() -> None:
+    # Enforced and report-only additional policies are stored separately.
+    request = rf.get("/")
+    response = HttpResponse()
+    response._csp_additional = [{"script-src": ["https://enforced.example.com"]}]
+    response._csp_additional_ro = [{"script-src": ["https://report.example.com"]}]
+    mw.process_response(request, response)
+    assert "https://enforced.example.com" in response[HEADER]
+    assert "https://report.example.com" not in response[HEADER]
+    assert "https://report.example.com" in response[HEADER_REPORT_ONLY]
+    assert "https://enforced.example.com" not in response[HEADER_REPORT_ONLY]
+
+
+def test_additional_policies_not_affected_by_update_replace() -> None:
+    # update/replace only apply to the main policy, never to additional ones.
+    request = rf.get("/")
+    response = HttpResponse()
+    response._csp_update = {"script-src": ["https://update.example.com"]}
+    response._csp_replace = {"img-src": ["https://replace.example.com"]}
+    response._csp_additional = [{"script-src": [SELF], "img-src": [SELF]}]
+    mw.process_response(request, response)
+    policies = response[HEADER].split(", ")
+    assert len(policies) == 2
+    assert "script-src https://update.example.com" in policies[0]
+    assert "img-src https://replace.example.com" in policies[0]
+    assert sorted(policies[1].split("; ")) == [
+        "default-src 'self'",
+        "img-src 'self'",
+        "script-src 'self'",
+    ]
+
+
+def test_additional_policies_only() -> None:
+    # An additional policy is emitted even if the main policy is empty.
+    request = rf.get("/")
+    response = HttpResponse()
+    response._csp_config = {}  # Empty config removes the main policy.
+    response._csp_additional = [{"script-src": [SELF]}]
+    mw.process_response(request, response)
+    assert response[HEADER] == "default-src 'self'; script-src 'self'"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import re
 from itertools import chain
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from django.conf import settings
 from django.utils.encoding import force_str
@@ -53,6 +53,9 @@ DEFAULT_DIRECTIVES = {
 
 DIRECTIVES_T = dict[str, Any]
 
+# Token used to represent the `NONCE` sentinel in serialized policy structures.
+SERIALIZED_NONCE = repr(NONCE)
+
 
 def default_config(csp: DIRECTIVES_T | None) -> DIRECTIVES_T | None:
     if csp is None:
@@ -62,6 +65,37 @@ def default_config(csp: DIRECTIVES_T | None) -> DIRECTIVES_T | None:
     for key, value in DEFAULT_DIRECTIVES.items():
         config[key] = csp.get(key, value)
     return config
+
+
+def serialize_policies(policies: Iterable[DIRECTIVES_T]) -> list[dict[str, Any]]:
+    """Serialize a list of policy directive dicts into a JSON-safe structure.
+
+    The `NONCE` sentinel is not JSON-serializable, so it is replaced with a
+    string token. Use `deserialize_policies` to restore the original
+    multi-policy structure.
+    """
+    serialized = []
+    for directives in policies:
+        serialized_directives = {}
+        for key, value in directives.items():
+            if isinstance(value, (list, tuple)):
+                value = [SERIALIZED_NONCE if item is NONCE else item for item in value]
+            serialized_directives[key] = value
+        serialized.append(serialized_directives)
+    return serialized
+
+
+def deserialize_policies(data: Iterable[dict[str, Any]]) -> list[DIRECTIVES_T]:
+    """Restore a multi-policy structure produced by `serialize_policies`."""
+    policies = []
+    for directives in data:
+        restored = {}
+        for key, value in directives.items():
+            if isinstance(value, list):
+                value = [NONCE if item == SERIALIZED_NONCE else item for item in value]
+            restored[key] = value
+        policies.append(restored)
+    return policies
 
 
 def build_policy(

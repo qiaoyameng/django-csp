@@ -102,3 +102,37 @@ def csp(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, **kwarg
         return _wrapped
 
     return decorator
+
+
+def csp_additional(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, **kwargs: Any) -> _VIEW_DECORATOR_T:
+    """Add an additional, independently enforced policy to the response.
+
+    Browsers enforce every received policy, so an additional policy can only
+    further restrict what the main policy allows, never widen it. Each
+    additional policy is processed independently (default-src fallback, nonce,
+    hashes and empty directives) and is not affected by `csp_update` or
+    `csp_replace`, which only target the main policy.
+    """
+    if config is None and kwargs:
+        raise RuntimeError(DECORATOR_DEPRECATION_ERROR.format(fname="csp_additional"))
+
+    if config is None:
+        processed_config: dict[str, list[Any]] = {}
+    else:
+        processed_config = {k: [v] if isinstance(v, str) else v for k, v in config.items()}
+
+    def decorator(f: _VIEW_T) -> _VIEW_T:
+        @wraps(f)
+        def _wrapped(*a: Any, **kw: Any) -> HttpResponseBase:
+            resp = f(*a, **kw)
+            attr = "_csp_additional_ro" if REPORT_ONLY else "_csp_additional"
+            additional = getattr(resp, attr, None)
+            if additional is None:
+                additional = []
+                setattr(resp, attr, additional)
+            additional.append(processed_config)
+            return resp
+
+        return _wrapped
+
+    return decorator

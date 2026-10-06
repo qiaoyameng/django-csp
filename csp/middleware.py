@@ -14,7 +14,7 @@ from django.utils.functional import SimpleLazyObject, empty
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.exceptions import CSPNonceError
-from csp.utils import DIRECTIVES_T, build_policy
+from csp.utils import DIRECTIVES_T, build_policy, default_config
 
 if TYPE_CHECKING:
     from django.http import HttpRequest, HttpResponseBase
@@ -79,29 +79,33 @@ class CSPMiddleware(MiddlewareMixin):
         if response.status_code in exempted_debug_codes and settings.DEBUG:
             return response
 
-        policy_parts = self.get_policy_parts(request=request, response=response)
-        csp = build_policy(**asdict(policy_parts))
-        if csp:
-            # Only set header if not already set and not an excluded prefix and not exempted.
-            is_not_exempt = getattr(response, "_csp_exempt", False) is False
-            no_header = HEADER not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER] = csp
-
-        policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
-        csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
-        if csp_ro:
-            # Only set header if not already set and not an excluded prefix and not exempted.
-            is_not_exempt = getattr(response, "_csp_exempt_ro", False) is False
-            no_header = HEADER_REPORT_ONLY not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER_REPORT_ONLY] = csp_ro
+        for report_only, header, exempt_attr, setting_name in (
+            (False, HEADER, "_csp_exempt", "CONTENT_SECURITY_POLICY"),
+            (True, HEADER_REPORT_ONLY, "_csp_exempt_ro", "CONTENT_SECURITY_POLICY_REPORT_ONLY"),
+        ):
+            policy_parts = self.get_policy_parts(request=request, response=response, report_only=report_only)
+            policies = []
+            csp = build_policy(**asdict(policy_parts), report_only=report_only)
+            if csp:
+                policies.append(csp)
+            # Additional policies are each built independently (default-src
+            # fallback, nonce, hashes and empty directives) and combined with
+            # the main policy using the multiple-policy semantics browsers
+            # enforce, rather than being merged into a single source union.
+            nonce = getattr(request, "_csp_nonce", None)
+            for additional_config in self.get_additional_policies(request, response, report_only=report_only):
+                additional = build_policy(config=default_config(additional_config), nonce=nonce)
+                if additional:
+                    policies.append(additional)
+            if policies:
+                # Only set header if not already set and not an excluded prefix and not exempted.
+                is_not_exempt = getattr(response, exempt_attr, False) is False
+                no_header = header not in response
+                policy = getattr(settings, setting_name, None) or {}
+                prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
+                is_not_excluded = not request.path_info.startswith(tuple(prefixes))
+                if no_header and is_not_exempt and is_not_excluded:
+                    response[header] = ", ".join(policies)
 
         # Once we've written the header, accessing the `request.csp_nonce` will no longer trigger
         # the nonce to be added to the header. Instead we throw an error here to catch this since
@@ -139,3 +143,16 @@ class CSPMiddleware(MiddlewareMixin):
         nonce = getattr(request, "_csp_nonce", None)
 
         return PolicyParts(config, update, replace, nonce)
+
+    def get_additional_policies(
+        self,
+        request: HttpRequest,
+        response: HttpResponseBase,
+        report_only: bool = False,
+    ) -> list[DIRECTIVES_T]:
+        """Return the additional policies attached to the response.
+
+        Enforced and report-only additional policies are stored separately.
+        """
+        attr = "_csp_additional_ro" if report_only else "_csp_additional"
+        return getattr(response, attr, None) or []

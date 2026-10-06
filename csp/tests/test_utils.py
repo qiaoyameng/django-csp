@@ -1,8 +1,16 @@
+import json
+
 from django.test.utils import override_settings
 from django.utils.functional import lazy
 
 from csp.constants import NONCE, NONE, SELF
-from csp.utils import DEFAULT_DIRECTIVES, build_policy, default_config
+from csp.utils import (
+    DEFAULT_DIRECTIVES,
+    build_policy,
+    default_config,
+    deserialize_policies,
+    serialize_policies,
+)
 
 
 def policy_eq(a: str, b: str) -> None:
@@ -375,3 +383,29 @@ def test_boolean_directives() -> None:
         with override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {directive: False}}):
             policy = build_policy()
             policy_eq("default-src 'self'", policy)
+
+
+def test_serialize_policies_round_trip() -> None:
+    """A serialized multi-policy structure restores to the same structure."""
+    policies = [
+        {"script-src": [SELF, NONCE], "upgrade-insecure-requests": True},
+        {"script-src": ["https://cdn.example.com", "'sha256-abc123'"], "sandbox": []},
+    ]
+    serialized = serialize_policies(policies)
+    # The serialized structure must be JSON-safe.
+    restored = deserialize_policies(json.loads(json.dumps(serialized)))
+    assert restored == policies
+    # The NONCE sentinel is restored as the identical singleton.
+    assert restored[0]["script-src"][1] is NONCE
+
+
+def test_serialize_policies_round_trip_same_output() -> None:
+    """Policies built from a restored structure match the original output."""
+    policies = [
+        {"script-src": [SELF, NONCE]},
+        {"script-src": ["https://cdn.example.com"]},
+    ]
+    restored = deserialize_policies(json.loads(json.dumps(serialize_policies(policies))))
+    original_headers = [build_policy(config=default_config(p), nonce="abc123") for p in policies]
+    restored_headers = [build_policy(config=default_config(p), nonce="abc123") for p in restored]
+    assert restored_headers == original_headers

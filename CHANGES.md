@@ -1,6 +1,19 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+- Added support for additional, independently enforced policies via the new
+  ``@csp_additional`` decorator (and the ``_csp_additional`` / ``_csp_additional_ro``
+  response attributes). Additional policies are emitted alongside the main policy using
+  the browser's multiple-policy semantics, so they can only tighten — never widen — the
+  effective policy. Each additional policy is processed independently (``default-src``
+  fallback, nonce, hashes and empty directives), enforced and report-only additional
+  policies are stored separately, and ``@csp_update`` / ``@csp_replace`` continue to
+  apply only to the main policy. Multi-policy structures can be serialized and restored
+  with ``csp.utils.serialize_policies`` / ``csp.utils.deserialize_policies``.
+
 4.0
 ===
 
