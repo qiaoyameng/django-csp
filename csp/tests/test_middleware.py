@@ -1,7 +1,10 @@
+import asyncio
+
 from django.http import (
     HttpResponse,
     HttpResponseNotFound,
     HttpResponseServerError,
+    StreamingHttpResponse,
 )
 from django.template import Context, Template, engines
 from django.test import RequestFactory
@@ -9,7 +12,7 @@ from django.test.utils import override_settings
 
 import pytest
 
-from csp.constants import HEADER, HEADER_REPORT_ONLY, SELF
+from csp.constants import HEADER, HEADER_REPORT_ONLY, NONCE, SELF
 from csp.exceptions import CSPNonceError
 from csp.middleware import CheckableLazyObject, CSPMiddleware
 from csp.tests.utils import response
@@ -287,3 +290,183 @@ def test_set_nonce_access_after_middleware_is_ok() -> None:
     mw.process_response(request, HttpResponse())
     assert bool(getattr(request, "csp_nonce", False)) is True
     assert str(getattr(request, "csp_nonce")) == nonce
+
+
+def test_streaming_nonce_is_fixed_before_response_body() -> None:
+    def body(request):
+        yield f'<script nonce="{request.csp_nonce}"></script>'
+
+    request1 = rf.get("/")
+    request2 = rf.get("/")
+    mw.process_request(request1)
+    mw.process_request(request2)
+    response1 = StreamingHttpResponse(body(request1))
+    response2 = StreamingHttpResponse(body(request2))
+    mw.process_response(request1, response1)
+    mw.process_response(request2, response2)
+
+    nonce1 = request1._csp_nonce
+    nonce2 = request2._csp_nonce
+    assert nonce1 != nonce2
+    assert response1[HEADER] == f"default-src 'self' 'nonce-{nonce1}'"
+    assert response2[HEADER] == f"default-src 'self' 'nonce-{nonce2}'"
+
+    iterator1 = iter(response1.streaming_content)
+    iterator2 = iter(response2.streaming_content)
+    assert next(iterator1) == f'<script nonce="{nonce1}"></script>'.encode()
+    assert next(iterator2) == f'<script nonce="{nonce2}"></script>'.encode()
+    with pytest.raises(StopIteration):
+        next(iterator1)
+    with pytest.raises(StopIteration):
+        next(iterator2)
+
+
+def test_async_streaming_nonce_is_fixed_before_response_body() -> None:
+    async def body(request):
+        yield f'<script nonce="{request.csp_nonce}"></script>'
+
+    async def test_body():
+        request1 = rf.get("/")
+        request2 = rf.get("/")
+        mw.process_request(request1)
+        mw.process_request(request2)
+        response1 = StreamingHttpResponse(body(request1))
+        response2 = StreamingHttpResponse(body(request2))
+        mw.process_response(request1, response1)
+        mw.process_response(request2, response2)
+
+        nonce1 = request1._csp_nonce
+        nonce2 = request2._csp_nonce
+        assert nonce1 != nonce2
+        assert response1[HEADER] == f"default-src 'self' 'nonce-{nonce1}'"
+        assert response2[HEADER] == f"default-src 'self' 'nonce-{nonce2}'"
+
+        iterator1 = response1.streaming_content
+        iterator2 = response2.streaming_content
+        assert await iterator1.__anext__() == f'<script nonce="{nonce1}"></script>'.encode()
+        assert await iterator2.__anext__() == f'<script nonce="{nonce2}"></script>'.encode()
+        with pytest.raises(StopAsyncIteration):
+            await iterator1.__anext__()
+        with pytest.raises(StopAsyncIteration):
+            await iterator2.__anext__()
+
+    asyncio.run(test_body())
+
+
+def test_streaming_nonce_recognized_as_scalar_policy_value() -> None:
+    request = rf.get("/")
+    mw.process_request(request)
+    response = StreamingHttpResponse((str(request.csp_nonce),))
+    setattr(response, "_csp_config", {"default-src": NONCE})
+    mw.process_response(request, response)
+
+    nonce = request._csp_nonce
+    assert response[HEADER] == f"default-src 'nonce-{nonce}'"
+    assert b"".join(response.streaming_content) == nonce.encode()
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF]}},
+    CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF, NONCE]}},
+)
+def test_streaming_nonce_is_fixed_for_report_only_policy() -> None:
+    request = rf.get("/")
+    mw.process_request(request)
+    response = StreamingHttpResponse((str(request.csp_nonce),))
+    mw.process_response(request, response)
+
+    nonce = request._csp_nonce
+    assert response[HEADER] == "default-src 'self'"
+    assert response[HEADER_REPORT_ONLY] == f"default-src 'self' 'nonce-{nonce}'"
+    assert b"".join(response.streaming_content) == nonce.encode()
+
+
+@override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF]}})
+def test_streaming_nonce_disabled_raises_on_late_read() -> None:
+    request = rf.get("/")
+
+    def body():
+        yield str(request.csp_nonce)
+
+    mw.process_request(request)
+    response = StreamingHttpResponse(body())
+    mw.process_response(request, response)
+    assert response[HEADER] == "default-src 'self'"
+    with pytest.raises(CSPNonceError):
+        list(response.streaming_content)
+
+
+@override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF]}})
+def test_async_streaming_nonce_disabled_raises_on_late_read() -> None:
+    request = rf.get("/")
+
+    async def body():
+        yield str(request.csp_nonce)
+
+    async def test_body():
+        async for _chunk in response.streaming_content:
+            pass
+
+    mw.process_request(request)
+    response = StreamingHttpResponse(body())
+    mw.process_response(request, response)
+    assert response[HEADER] == "default-src 'self'"
+    with pytest.raises(CSPNonceError):
+        asyncio.run(test_body())
+
+
+def test_closed_streaming_nonce_does_not_leak_to_next_request() -> None:
+    def body():
+        yield "before"
+        yield str(request1.csp_nonce)
+
+    request1 = rf.get("/")
+    mw.process_request(request1)
+    response1 = StreamingHttpResponse(body())
+    mw.process_response(request1, response1)
+    nonce1 = request1._csp_nonce
+    iterator = iter(response1.streaming_content)
+    assert next(iterator) == b"before"
+    response1.close()
+
+    request2 = rf.get("/")
+    mw.process_request(request2)
+    response2 = StreamingHttpResponse(
+        f'<script nonce="{request2.csp_nonce}"></script>' for _value in ()
+    )
+    assert getattr(request2, "_csp_nonce", None) is None
+    mw.process_response(request2, response2)
+    nonce2 = request2._csp_nonce
+    assert nonce1 != nonce2
+
+
+def test_cancelled_async_streaming_nonce_does_not_leak_to_next_request() -> None:
+    async def body():
+        yield "before"
+        await asyncio.Event().wait()
+
+    async def consume(response):
+        async for _chunk in response.streaming_content:
+            await asyncio.Event().wait()
+
+    async def test_body():
+        request1 = rf.get("/")
+        mw.process_request(request1)
+        response1 = StreamingHttpResponse(body())
+        mw.process_response(request1, response1)
+        nonce1 = request1._csp_nonce
+        task = asyncio.create_task(consume(response1))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        request2 = rf.get("/")
+        mw.process_request(request2)
+        response2 = StreamingHttpResponse(())
+        assert getattr(request2, "_csp_nonce", None) is None
+        mw.process_response(request2, response2)
+        nonce2 = request2._csp_nonce
+        assert nonce1 != nonce2
+
+    asyncio.run(test_body())

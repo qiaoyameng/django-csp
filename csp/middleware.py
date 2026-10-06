@@ -14,7 +14,7 @@ from django.utils.functional import SimpleLazyObject, empty
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.exceptions import CSPNonceError
-from csp.utils import DIRECTIVES_T, build_policy
+from csp.utils import DIRECTIVES_T, build_policy, policy_contains_nonce
 
 if TYPE_CHECKING:
     from django.http import HttpRequest, HttpResponseBase
@@ -80,6 +80,16 @@ class CSPMiddleware(MiddlewareMixin):
             return response
 
         policy_parts = self.get_policy_parts(request=request, response=response)
+        policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
+
+        if getattr(response, "streaming", False):
+            self._prepare_streaming_nonce(
+                request=request,
+                response=response,
+                policy_parts=policy_parts,
+                policy_parts_ro=policy_parts_ro,
+            )
+
         csp = build_policy(**asdict(policy_parts))
         if csp:
             # Only set header if not already set and not an excluded prefix and not exempted.
@@ -91,7 +101,6 @@ class CSPMiddleware(MiddlewareMixin):
             if no_header and is_not_exempt and is_not_excluded:
                 response[HEADER] = csp
 
-        policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
         csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
         if csp_ro:
             # Only set header if not already set and not an excluded prefix and not exempted.
@@ -110,6 +119,56 @@ class CSPMiddleware(MiddlewareMixin):
             setattr(request, "csp_nonce", CheckableLazyObject(self._csp_nonce_post_response))
 
         return response
+
+    def _prepare_streaming_nonce(
+        self,
+        request: HttpRequest,
+        response: HttpResponseBase,
+        policy_parts: PolicyParts,
+        policy_parts_ro: PolicyParts,
+    ) -> None:
+        include_nonce = self._policy_will_include_nonce(
+            request=request,
+            response=response,
+            policy_parts=policy_parts,
+        ) or self._policy_will_include_nonce(
+            request=request,
+            response=response,
+            policy_parts=policy_parts_ro,
+            report_only=True,
+        )
+        if include_nonce:
+            nonce = self._make_nonce(request)
+            policy_parts.nonce = nonce
+            policy_parts_ro.nonce = nonce
+
+    def _policy_will_include_nonce(
+        self,
+        request: HttpRequest,
+        response: HttpResponseBase,
+        policy_parts: PolicyParts,
+        report_only: bool = False,
+    ) -> bool:
+        if not policy_contains_nonce(
+            config=policy_parts.config,
+            update=policy_parts.update,
+            replace=policy_parts.replace,
+            report_only=report_only,
+        ):
+            return False
+
+        header = HEADER_REPORT_ONLY if report_only else HEADER
+        if header in response:
+            return False
+
+        exempt = getattr(response, "_csp_exempt_ro", False) if report_only else getattr(response, "_csp_exempt", False)
+        if exempt:
+            return False
+
+        setting_name = "CONTENT_SECURITY_POLICY_REPORT_ONLY" if report_only else "CONTENT_SECURITY_POLICY"
+        policy = getattr(settings, setting_name, None) or {}
+        prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
+        return not request.path_info.startswith(tuple(prefixes))
 
     def build_policy(self, request: HttpRequest, response: HttpResponseBase) -> str:
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)

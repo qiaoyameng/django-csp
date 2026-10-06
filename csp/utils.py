@@ -73,13 +73,7 @@ def build_policy(
 ) -> str:
     """Builds the policy as a string from the settings."""
 
-    if config is None:
-        if report_only:
-            config = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", {})
-            config = default_config(config.get("DIRECTIVES", {})) if config else None
-        else:
-            config = getattr(settings, "CONTENT_SECURITY_POLICY", {})
-            config = default_config(config.get("DIRECTIVES", {})) if config else None
+    config = get_policy_config(config=config, report_only=report_only)
 
     # If config is still `None`, return empty policy.
     if config is None:
@@ -140,6 +134,64 @@ def build_policy(
         policy_parts["report-uri"] = " ".join(report_uri)
 
     return "; ".join([f"{k} {val}".strip() for k, val in policy_parts.items()])
+
+
+def get_policy_config(
+    config: DIRECTIVES_T | None = None,
+    report_only: bool = False,
+) -> DIRECTIVES_T | None:
+    if config is not None:
+        return config
+
+    if report_only:
+        setting = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", {})
+    else:
+        setting = getattr(settings, "CONTENT_SECURITY_POLICY", {})
+
+    return default_config(setting.get("DIRECTIVES", {})) if setting else None
+
+
+def policy_contains_nonce(
+    config: DIRECTIVES_T | None = None,
+    update: DIRECTIVES_T | None = None,
+    replace: DIRECTIVES_T | None = None,
+    report_only: bool = False,
+) -> bool:
+    config = get_policy_config(config=config, report_only=report_only)
+    if config is None:
+        return False
+
+    update = update if update is not None else {}
+    replace = replace if replace is not None else {}
+    directives: DIRECTIVES_T = {}
+
+    for key in set(chain(config, replace)):
+        value = replace[key] if key in replace else config[key]
+        if value is not None:
+            value = copy.copy(value)
+            if isinstance(value, set):
+                value = sorted(value)
+            if not isinstance(value, (list, tuple)):
+                value = (value,)
+            directives[key] = value
+
+    for key, value in update.items():
+        if value is not None:
+            value = copy.copy(value)
+            if isinstance(value, set):
+                value = sorted(value)
+            if not isinstance(value, (list, tuple)):
+                value = (value,)
+            if directives.get(key) is None:
+                directives[key] = value
+            else:
+                directives[key] += tuple(value)
+
+    directives.pop("report-uri", None)
+    return any(
+        value == NONCE or (isinstance(value, (list, tuple, set)) and NONCE in value)
+        for value in directives.values()
+    )
 
 
 def _default_attr_mapper(attr_name: str, val: str) -> str:
