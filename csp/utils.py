@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import base64
+from bisect import bisect_right
 import copy
+import hashlib
 import re
+from dataclasses import dataclass
+from html.parser import HTMLParser
 from itertools import chain
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from django.conf import settings
 from django.utils.encoding import force_str
@@ -53,6 +58,201 @@ DEFAULT_DIRECTIVES = {
 
 DIRECTIVES_T = dict[str, Any]
 
+SUPPORTED_HASH_ALGORITHMS = ("sha256", "sha384", "sha512")
+
+
+@dataclass(frozen=True)
+class InlineElement:
+    tag: str
+    directive: str
+    start_offset: int
+    end_offset: int
+    line: int
+    column: int
+    content_start_offset: int
+    content_end_offset: int
+    content_line: int
+    content_column: int
+
+
+@dataclass(frozen=True)
+class InlineHash:
+    directive: str
+    algorithm: str
+    digest: str
+    sources: tuple[InlineElement, ...]
+
+    @property
+    def value(self) -> str:
+        return f"'{self.algorithm}-{self.digest}'"
+
+
+HASH_MANIFEST_T = Sequence[InlineHash]
+
+_RAW_TEXT_TAGS = {
+    "script": "script-src",
+    "style": "style-src",
+}
+_RAW_TEXT_END_TAGS = {
+    tag: re.compile(
+        rf"</{re.escape(tag)}(?:[\t\n\f\r />][\s\S]*?)?>",
+        re.IGNORECASE,
+    )
+    for tag in _RAW_TEXT_TAGS
+}
+
+
+class _InlineElementParser(HTMLParser):
+    def __init__(self, html: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self.html = html
+        self.browser_line_starts = [0]
+        self.parser_line_starts = [0]
+        for index, char in enumerate(html):
+            if char in "\r\n" and not (
+                char == "\n" and index > 0 and html[index - 1] == "\r"
+            ):
+                self.browser_line_starts.append(index + 1)
+            if char == "\n":
+                self.parser_line_starts.append(index + 1)
+        self.elements: list[InlineElement] = []
+        self._pending_tag: str | None = None
+        self._pending_directive: str | None = None
+        self._pending_start = 0
+        self._pending_line = 0
+        self._pending_column = 0
+        self._pending_content_start = 0
+        self._pending_content: list[str] = []
+
+    def _position(self, offset: int) -> tuple[int, int]:
+        line = bisect_right(self.browser_line_starts, offset)
+        return line, offset - self.browser_line_starts[line - 1]
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        directive = _RAW_TEXT_TAGS.get(tag)
+        if directive is None:
+            return
+
+        opening_tag = self.get_starttag_text()
+        if opening_tag is None:
+            return
+
+        parser_line, parser_column = self.getpos()
+        start_offset = self._absolute_offset(parser_line, parser_column)
+        line, column = self._position(start_offset)
+        content_start = start_offset + len(opening_tag)
+
+        if tag == "script" and any(name == "src" for name, _value in attrs):
+            self._clear_pending()
+            return
+
+        self._pending_tag = tag
+        self._pending_directive = directive
+        self._pending_start = start_offset
+        self._pending_line = line
+        self._pending_column = column
+        self._pending_content_start = content_start
+        self._pending_content = []
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _RAW_TEXT_TAGS:
+            self.handle_starttag(tag, attrs)
+
+    def close(self) -> None:
+        super().close()
+        self._clear_pending()
+
+    def handle_data(self, data: str) -> None:
+        if self._pending_tag is not None:
+            self._pending_content.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != self._pending_tag or self._pending_directive is None:
+            return
+
+        content_start = self._pending_content_start
+        content_end = content_start + len("".join(self._pending_content))
+        end_tag = _RAW_TEXT_END_TAGS[tag]
+        match = end_tag.search(self.html, content_end)
+        if match is None or match.start() != content_end:
+            self._clear_pending()
+            return
+
+        content_line, content_column = self._position(content_start)
+        self.elements.append(
+            InlineElement(
+                tag=tag,
+                directive=self._pending_directive,
+                start_offset=self._pending_start,
+                end_offset=match.end(),
+                line=self._pending_line,
+                column=self._pending_column,
+                content_start_offset=content_start,
+                content_end_offset=content_end,
+                content_line=content_line,
+                content_column=content_column,
+            )
+        )
+        self._clear_pending()
+
+    def _clear_pending(self) -> None:
+        self._pending_tag = None
+        self._pending_directive = None
+        self._pending_start = 0
+        self._pending_line = 0
+        self._pending_column = 0
+        self._pending_content_start = 0
+        self._pending_content = []
+
+    def _absolute_offset(self, line: int, column: int) -> int:
+        return self.parser_line_starts[line - 1] + column
+
+
+def build_hash_manifest(
+    html: str,
+    algorithms: Sequence[str] = ("sha256",),
+) -> list[InlineHash]:
+    """Build deduplicated CSP hashes for inline script and style elements."""
+    selected_algorithms = list(dict.fromkeys(algorithm.lower() for algorithm in algorithms))
+    unsupported = sorted(set(selected_algorithms) - set(SUPPORTED_HASH_ALGORITHMS))
+    if unsupported:
+        raise ValueError(f"Unsupported CSP hash algorithm(s): {', '.join(unsupported)}")
+
+    parser = _InlineElementParser(html)
+    parser.feed(html)
+    parser.close()
+
+    grouped_elements: dict[tuple[str, str], list[InlineElement]] = {}
+    for element in parser.elements:
+        content = html[element.content_start_offset:element.content_end_offset]
+        normalized_content = content.replace("\r\n", "\n").replace("\r", "\n")
+        key = (element.directive, normalized_content)
+        grouped_elements.setdefault(key, []).append(element)
+
+    manifest: list[InlineHash] = []
+    for (directive, content), sources in grouped_elements.items():
+        encoded_content = content.encode("utf-8")
+        for algorithm in selected_algorithms:
+            digest = base64.b64encode(hashlib.new(algorithm, encoded_content).digest()).decode("ascii")
+            manifest.append(
+                InlineHash(
+                    directive=directive,
+                    algorithm=algorithm,
+                    digest=digest,
+                    sources=tuple(sources),
+                )
+            )
+
+    return manifest
+
+
+def _hash_manifest_updates(hash_manifest: HASH_MANIFEST_T | None) -> dict[str, tuple[str, ...]]:
+    updates: dict[str, list[str]] = {}
+    for inline_hash in hash_manifest or ():
+        directive = inline_hash.directive
+        updates.setdefault(directive, []).append(inline_hash.value)
+    return {directive: tuple(dict.fromkeys(values)) for directive, values in updates.items()}
+
 
 def default_config(csp: DIRECTIVES_T | None) -> DIRECTIVES_T | None:
     if csp is None:
@@ -70,6 +270,7 @@ def build_policy(
     replace: DIRECTIVES_T | None = None,
     nonce: str | None = None,
     report_only: bool = False,
+    hash_manifest: HASH_MANIFEST_T | None = None,
 ) -> str:
     """Builds the policy as a string from the settings."""
 
@@ -87,6 +288,7 @@ def build_policy(
 
     update = update if update is not None else {}
     replace = replace if replace is not None else {}
+    update = {**update, **_hash_manifest_updates(hash_manifest)}
 
     csp = {}
 
