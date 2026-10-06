@@ -24,6 +24,8 @@ INSTALLED_APPS = (
 
 SECRET_KEY = "csp-test-key"
 
+ROOT_URLCONF = "csp.tests.urls"
+
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.jinja2.Jinja2",

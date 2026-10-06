@@ -1,6 +1,18 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+- Added an optional report-receiving view in ``csp.contrib.reports``.  It
+  accepts both ``application/csp-report`` (legacy) and
+  ``application/reports+json`` (Reporting API array) violation reports,
+  validates and redacts them, and forwards each accepted event to an
+  application callback.  Request body size, batch size and string/URI lengths
+  are bounded; individual bad elements of a Reporting API batch are skipped
+  while good elements are still delivered.  The default callback logs a short
+  redacted summary rather than the raw body.
+
 4.0
 ===
 
