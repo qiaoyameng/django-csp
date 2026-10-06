@@ -1,6 +1,12 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+- Added an optional `csp.views.report_receiver` view for legacy `application/csp-report` and
+  Reporting API `application/reports+json` CSP violation reports.
+
 4.0
 ===
 
