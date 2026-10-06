@@ -157,6 +157,11 @@ an error when nonce is accessed after response if not already generated.
 - Made changes to simplify middleware logic and make `CSPMiddleware` easier to subclass. The updated
 middleware returns a PolicyParts dataclass that can be modified before the policy is built.
 ([#237](https://github.com/mozilla/django-csp/pull/237))
+- Added `csp.analyzer`, a read-only policy analyzer that parses structured configs or full policy
+text, flags duplicate directives, invalid source expressions, and incompatible keywords, and
+explains the effective per-resource constraints for a given CSP level (including values ignored by
+rules such as `'strict-dynamic'` and values inherited via `default-src` fallback). The report is
+descriptive only and is not a security score.
 
 ## Other Changes
 
