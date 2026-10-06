@@ -128,6 +128,11 @@ the separate `CONTENT_SECURITY_POLICY` and `CONTENT_SECURITY_POLICY_REPORT_ONLY`
 `"'self'"`) to minimize quoting mistakes and typos.
 ([#222](https://github.com/mozilla/django-csp/pull/222))
 
+- Added the read-only `csp.analysis` policy analyzer. It accepts complete policy text or structured
+  directives, reports invalid and ignored source expressions, and traces effective script, style, and
+  common resource constraints back to their original directive and source locations. It is a syntax
+  and rule interpretation tool, not a comprehensive security score.
+
   **Example:**
 
   Change from:
