@@ -98,6 +98,11 @@ separate list to using a sentinel `NONCE` value in the directive itself.
 
 ## New Features and Improvements
 
+- **CSP Hash Manifests**: Added `csp.hashes.generate_hash_manifest`, a pure function that extracts
+CSP hash source expressions for the inline `<script>` and `<style>` elements of a rendered HTML
+document. The resulting manifest can be passed to `build_policy` via the new `hash_manifest`
+argument, enabling hash-based policies for static pages where nonces are impractical.
+
 - **Dual Policy Support**: Added support for enforced and report-only policies simultaneously using
 the separate `CONTENT_SECURITY_POLICY` and `CONTENT_SECURITY_POLICY_REPORT_ONLY` settings.
 

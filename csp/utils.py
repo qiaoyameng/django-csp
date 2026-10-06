@@ -3,12 +3,15 @@ from __future__ import annotations
 import copy
 import re
 from itertools import chain
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from django.conf import settings
 from django.utils.encoding import force_str
 
 from csp.constants import NONCE, SELF
+
+if TYPE_CHECKING:
+    from csp.hashes import HashManifest
 
 DEFAULT_DIRECTIVES = {
     # Fetch Directives
@@ -69,6 +72,7 @@ def build_policy(
     update: DIRECTIVES_T | None = None,
     replace: DIRECTIVES_T | None = None,
     nonce: str | None = None,
+    hash_manifest: HashManifest | None = None,
     report_only: bool = False,
 ) -> str:
     """Builds the policy as a string from the settings."""
@@ -112,6 +116,15 @@ def build_policy(
                 v = (v,)
             if csp.get(k) is None:
                 csp[k] = v
+            else:
+                csp[k] += tuple(v)
+
+    if hash_manifest is not None:
+        # Append hash source expressions for inline <script>/<style> elements,
+        # creating the directive if the config does not define it.
+        for k, v in hash_manifest.directive_sources().items():
+            if csp.get(k) is None:
+                csp[k] = tuple(v)
             else:
                 csp[k] += tuple(v)
 
